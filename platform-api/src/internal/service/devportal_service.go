@@ -51,6 +51,15 @@ func sanitizeAPIHandle(handle string) string {
 	return handle
 }
 
+type IDevPortalClientService interface {
+	SyncOrganizationToDevPortal(devPortal *model.DevPortal, organization *model.Organization) error
+	CreateDefaultSubscriptionPolicy(devPortal *model.DevPortal) error
+	CreateDevPortalClient(devPortal *model.DevPortal) *devportal_client.DevPortalClient
+	PublishAPIToDevPortal(client *devportal_client.DevPortalClient, orgID string, apiMetadata devportal_client.APIMetadataRequest, apiDefinition []byte) (*devportal_client.APIResponse, error)
+	CheckAPIExists(client *devportal_client.DevPortalClient, orgID string, apiID string) (bool, error)
+	UnpublishAPIFromDevPortal(client *devportal_client.DevPortalClient, orgID string, apiID string) error
+}
+
 // DevPortalService manages DevPortal operations using optimized data fetching and delegating client calls
 type DevPortalService struct {
 	devPortalRepo      repository.DevPortalRepository
@@ -59,7 +68,7 @@ type DevPortalService struct {
 	apiRepo            repository.APIRepository
 	apiUtil            *utils.APIUtil
 	config             *config.Server          // Global configuration for role mapping
-	devPortalClientSvc *DevPortalClientService // Handles all DevPortal client interactions
+	devPortalClientSvc IDevPortalClientService // Handles all DevPortal client interactions
 	validator          *validator.Validate
 }
 
