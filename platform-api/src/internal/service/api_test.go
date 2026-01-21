@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2026, WSO2 LLC. (http://www.wso2.org) All Rights Reserved.
+ *  Copyright (c) 2025, WSO2 LLC. (http://www.wso2.org) All Rights Reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -22,31 +22,7 @@ import (
 
 	"platform-api/src/internal/constants"
 	"platform-api/src/internal/model"
-	"platform-api/src/internal/repository"
 )
-
-// mockAPIRepository is a mock implementation of the APIRepository interface
-type mockAPIRepository struct {
-	repository.APIRepository // Embed interface for unimplemented methods
-
-	// Mock behavior configuration
-	handleExistsResult      bool
-	handleExistsError       error
-	nameVersionExistsResult bool
-	nameVersionExistsError  error
-
-	// Call tracking for verification
-	lastExcludeHandle string
-}
-
-func (m *mockAPIRepository) CheckAPIExistsByHandleInOrganization(handle, orgUUID string) (bool, error) {
-	return m.handleExistsResult, m.handleExistsError
-}
-
-func (m *mockAPIRepository) CheckAPIExistsByNameAndVersionInOrganization(name, version, orgUUID, excludeHandle string) (bool, error) {
-	m.lastExcludeHandle = excludeHandle // Track for verification
-	return m.nameVersionExistsResult, m.nameVersionExistsError
-}
 
 // TestValidateUpdateAPIRequest tests the validateUpdateAPIRequest method
 func TestValidateUpdateAPIRequest(t *testing.T) {
