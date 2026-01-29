@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -193,6 +194,76 @@ func TestSQLiteLLMTemplateCRUD(t *testing.T) {
 	})
 }
 
+func TestSQLiteErrors(t *testing.T) {
+	assert.True(t, IsConflictError(ErrConflict))
+	assert.True(t, IsNotFoundError(ErrNotFound))
+	assert.True(t, IsDatabaseUnavailableError(ErrDatabaseUnavailable))
+
+	assert.False(t, isUniqueConstraintError(nil))
+	assert.True(t, isUniqueConstraintError(errors.New("UNIQUE constraint failed: deployments.id")))
+	assert.False(t, isCertificateUniqueConstraintError(nil))
+	assert.True(t, isCertificateUniqueConstraintError(errors.New("UNIQUE constraint failed: certificates.name")))
+	assert.False(t, isAPIKeyUniqueConstraintError(nil))
+	assert.True(t, isAPIKeyUniqueConstraintError(errors.New("UNIQUE constraint failed: api_keys.api_key")))
+}
+
+func TestSQLiteLoaders(t *testing.T) {
+	storage, cleanup := setupSQLite(t)
+	defer cleanup()
+
+	// Setup data
+	cfg := &models.StoredConfig{
+		ID:   "api-1",
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			Metadata: api.Metadata{Name: "api-1"},
+			Spec: api.APIConfiguration_Spec{},
+		},
+		Status:    models.StatusPending,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	_ = storage.SaveConfig(cfg)
+
+	template := &models.StoredLLMProviderTemplate{
+		ID: "tmpl-1",
+		Configuration: api.LLMProviderTemplate{
+			Metadata: api.Metadata{Name: "tmpl-1"},
+		},
+	}
+	_ = storage.SaveLLMProviderTemplate(template)
+
+	apiKey := &models.APIKey{
+		ID:     "key-1",
+		Name:   "key-1",
+		APIKey: "val-1",
+		APIId:  "api-1",
+		Status: models.APIKeyStatusActive,
+	}
+	_ = storage.SaveAPIKey(apiKey)
+
+	cache := NewConfigStore()
+	apiKeyStore := NewAPIKeyStore(zaptest.NewLogger(t))
+
+	t.Run("LoadFromDatabase", func(t *testing.T) {
+		err := LoadFromDatabase(storage, cache)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(cache.GetAll()))
+	})
+
+	t.Run("LoadLLMProviderTemplatesFromDatabase", func(t *testing.T) {
+		err := LoadLLMProviderTemplatesFromDatabase(storage, cache)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(cache.GetAllTemplates()))
+	})
+
+	t.Run("LoadAPIKeysFromDatabase", func(t *testing.T) {
+		err := LoadAPIKeysFromDatabase(storage, cache, apiKeyStore)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, apiKeyStore.Count())
+	})
+}
+
 func TestSQLiteCertificateCRUD(t *testing.T) {
 	storage, cleanup := setupSQLite(t)
 	defer cleanup()
@@ -283,6 +354,18 @@ func TestSQLiteAPIKeyCRUD(t *testing.T) {
 	t.Run("SaveAPIKey", func(t *testing.T) {
 		err := storage.SaveAPIKey(apiKey)
 		assert.NoError(t, err)
+
+		// Test update via SaveAPIKey
+		apiKey.Status = models.APIKeyStatusRevoked
+		err = storage.SaveAPIKey(apiKey)
+		assert.NoError(t, err)
+
+		got, _ := storage.GetAPIKeyByKey(keyValue)
+		assert.Equal(t, models.APIKeyStatusRevoked, got.Status)
+
+		// Set back to active for GetAllAPIKeys
+		apiKey.Status = models.APIKeyStatusActive
+		_ = storage.SaveAPIKey(apiKey)
 	})
 
 	t.Run("GetAPIKeyByKey", func(t *testing.T) {

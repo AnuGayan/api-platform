@@ -168,6 +168,77 @@ func TestValidateAuthConfig_BothAuthDisabled_AllowsNoAuthMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestValidator_MissingFields(t *testing.T) {
+	validator := NewAPIValidator()
+
+	t.Run("Missing display name", func(t *testing.T) {
+		specUnion := api.APIConfiguration_Spec{}
+		specUnion.FromAPIConfigData(api.APIConfigData{
+			Version: "v1",
+			Context: "/test",
+		})
+		cfg := &api.APIConfiguration{Kind: api.RestApi, Spec: specUnion}
+		errs := validator.Validate(cfg)
+		assert.NotEmpty(t, errs)
+	})
+
+	t.Run("Missing version", func(t *testing.T) {
+		specUnion := api.APIConfiguration_Spec{}
+		specUnion.FromAPIConfigData(api.APIConfigData{
+			DisplayName: "Test",
+			Context:     "/test",
+		})
+		cfg := &api.APIConfiguration{Kind: api.RestApi, Spec: specUnion}
+		errs := validator.Validate(cfg)
+		assert.NotEmpty(t, errs)
+	})
+
+	t.Run("Missing context", func(t *testing.T) {
+		specUnion := api.APIConfiguration_Spec{}
+		specUnion.FromAPIConfigData(api.APIConfigData{
+			DisplayName: "Test",
+			Version:     "v1",
+		})
+		cfg := &api.APIConfiguration{Kind: api.RestApi, Spec: specUnion}
+		errs := validator.Validate(cfg)
+		assert.NotEmpty(t, errs)
+	})
+
+	t.Run("Valid Asyncwebsub", func(t *testing.T) {
+		specUnion := api.APIConfiguration_Spec{}
+		specUnion.FromWebhookAPIData(api.WebhookAPIData{
+			Name:    "async-api",
+			Version: "v1.0",
+			Context: "/events",
+			Servers: []api.Server{
+				{Url: "http://hub:8080"},
+			},
+			Channels: []api.Channel{
+				{Path: "/topic"},
+			},
+		})
+		cfg := &api.APIConfiguration{
+			ApiVersion: "gateway.api-platform.wso2.com/v1alpha1",
+			Kind:       api.Asyncwebsub,
+			Spec:       specUnion,
+		}
+		errs := validator.Validate(cfg)
+		assert.Empty(t, errs)
+	})
+
+	t.Run("Invalid Asyncwebsub - missing channels", func(t *testing.T) {
+		specUnion := api.APIConfiguration_Spec{}
+		specUnion.FromWebhookAPIData(api.WebhookAPIData{
+			Name:    "async-api",
+			Version: "v1",
+			Context: "/events",
+		})
+		cfg := &api.APIConfiguration{Kind: api.Asyncwebsub, Spec: specUnion}
+		errs := validator.Validate(cfg)
+		assert.NotEmpty(t, errs)
+	})
+}
+
 func TestValidateAuthConfig_BasicAuthEnabled(t *testing.T) {
 	// Test that validation passes when basic auth is enabled
 	config := &Config{

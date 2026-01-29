@@ -95,6 +95,23 @@ func TestConfigStoreCRUD(t *testing.T) {
 		got, err := store.Get(configID)
 		assert.NoError(t, err)
 		assert.Equal(t, models.StatusDeployed, got.Status)
+
+		// Test handle change
+		oldHandle := cfg.Configuration.Metadata.Name
+		// Copy cfg
+		newCfg := *cfg
+		newCfg.Configuration.Metadata.Name = "new-handle"
+		err = store.Update(&newCfg)
+		assert.NoError(t, err)
+
+		_, err = store.GetByHandle("new-handle")
+		assert.NoError(t, err)
+		_, err = store.GetByHandle(oldHandle)
+		assert.Error(t, err)
+
+		// Revert handle for subsequent tests
+		newCfg.Configuration.Metadata.Name = oldHandle
+		_ = store.Update(&newCfg)
 	})
 
 	t.Run("GetAll", func(t *testing.T) {
@@ -119,6 +136,48 @@ func TestConfigStoreCRUD(t *testing.T) {
 
 		_, err = store.Get(configID)
 		assert.Error(t, err)
+	})
+
+	t.Run("Asyncwebsub topics", func(t *testing.T) {
+		asyncID := uuid.New().String()
+		// Valid WebhookAPIData spec
+		asyncSpecJSON := `{"name": "test-webhook", "context": "ctx", "version": "v1", "channels": [{"path": "/events"}]}`
+		var asyncSpec api.APIConfiguration_Spec
+		_ = asyncSpec.UnmarshalJSON([]byte(asyncSpecJSON))
+
+		asyncCfg := &models.StoredConfig{
+			ID:   asyncID,
+			Kind: string(api.Asyncwebsub),
+			Configuration: api.APIConfiguration{
+				Kind: api.Asyncwebsub,
+				Metadata: api.Metadata{
+					Name: "async-handle",
+				},
+				Spec: asyncSpec,
+			},
+		}
+
+		err := store.Add(asyncCfg)
+		assert.NoError(t, err)
+		assert.True(t, store.TopicManager.Contains(asyncID, "test-webhook_ctx_v1_events"))
+
+		// Update topics
+		asyncSpecJSON2 := `{"name": "test-webhook", "context": "ctx", "version": "v1", "channels": [{"path": "/new-events"}]}`
+		_ = asyncSpec.UnmarshalJSON([]byte(asyncSpecJSON2))
+		asyncCfg.Configuration.Spec = asyncSpec
+		err = store.Update(asyncCfg)
+		assert.NoError(t, err)
+		assert.False(t, store.TopicManager.Contains(asyncID, "test-webhook_ctx_v1_events"))
+		assert.True(t, store.TopicManager.Contains(asyncID, "test-webhook_ctx_v1_new-events"))
+
+		// Update with no topic changes
+		err = store.Update(asyncCfg)
+		assert.NoError(t, err)
+		assert.True(t, store.TopicManager.Contains(asyncID, "test-webhook_ctx_v1_new-events"))
+
+		err = store.Delete(asyncID)
+		assert.NoError(t, err)
+		assert.False(t, store.TopicManager.Contains(asyncID, "test-webhook_ctx_v1_new-events"))
 	})
 }
 
