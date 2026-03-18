@@ -238,10 +238,10 @@ func (c *Client) Stop() {
 
 // Connect establishes a WebSocket connection to the control plane
 func (c *Client) Connect() error {
-	c.setState(Connecting)
+	c.setState(Connecting)	wsURL := c.resolveWebSocketConnectURL()
 
 	c.logger.Info("Connecting to control plane",
-		slog.String("url", c.getWebSocketConnectURL()),
+		slog.String("url", wsURL),
 		slog.Bool("on_prem", c.config.OnPrem),
 		slog.Int("retry_count", c.state.RetryCount),
 	)
@@ -263,8 +263,7 @@ func (c *Client) Connect() error {
 	headers := http.Header{}
 	headers.Add("api-key", c.config.Token)
 
-	// Dial WebSocket: URL built from host (path depends on OnPrem)
-	wsURL := c.getWebSocketConnectURL()
+	// Dial WebSocket: URL resolved from well-known endpoint with fallback to configured path.
 	conn, resp, err := dialer.Dial(wsURL, headers)
 	if err != nil {
 		if resp != nil {
@@ -327,6 +326,77 @@ func (c *Client) Connect() error {
 	go c.heartbeatMonitor()
 
 	return nil
+}
+
+type controlPlaneWellKnownResponse struct {
+	GatewayPath string `json:"gateway_path"`
+}
+
+// resolveWebSocketConnectURL resolves the registration URL using the control plane well-known endpoint.
+// Falls back to the default configured URL when discovery fails.
+func (c *Client) resolveWebSocketConnectURL() string {
+	gatewayPath, err := c.discoverGatewayPath()
+	if err != nil {
+		c.logger.Debug("Failed to resolve gateway path from well-known endpoint, falling back to configured URL",
+			slog.Any("error", err),
+		)
+		return c.getWebSocketConnectURL()
+	}
+
+	resolvedURL := fmt.Sprintf("wss://%s%s/gateways/connect", c.config.Host, gatewayPath)
+	c.logger.Debug("Resolved WebSocket connect URL from well-known endpoint",
+		slog.String("gateway_path", gatewayPath),
+		slog.String("resolved_url", resolvedURL),
+	)
+
+	return resolvedURL
+}
+
+// discoverGatewayPath fetches the gateway websocket base path from the control plane well-known endpoint.
+func (c *Client) discoverGatewayPath() (string, error) {
+	wellKnownURL := fmt.Sprintf("https://%s/internal/gateway/.well-known", c.config.Host)
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: c.config.InsecureSkipVerify},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, wellKnownURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create well-known request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to call well-known endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("well-known endpoint returned non-200 status: %d", resp.StatusCode)
+	}
+
+	var wellKnownResp controlPlaneWellKnownResponse
+	if err := json.NewDecoder(resp.Body).Decode(&wellKnownResp); err != nil {
+		return "", fmt.Errorf("failed to decode well-known response: %w", err)
+	}
+
+	gatewayPath := normalizeGatewayPath(wellKnownResp.GatewayPath)
+	if gatewayPath == "" {
+		return "", fmt.Errorf("well-known response missing gateway_path")
+	}
+
+	return gatewayPath, nil
+}
+
+func normalizeGatewayPath(path string) string {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return ""
+	}
+	return "/" + trimmed
 }
 
 // waitForConnectionAck waits for the connection.ack message from the server

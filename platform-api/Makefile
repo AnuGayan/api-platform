@@ -28,7 +28,7 @@ DOCKER_REGISTRY ?= ghcr.io/wso2/api-platform
 IMAGE_NAME := $(DOCKER_REGISTRY)/platform-api
 PORT ?= 9243
 
-.PHONY: help build test push build-and-push-multiarch
+.PHONY: help build test java-build java-test java-run push build-and-push-multiarch
 
 help: ## Show this help message
 	@echo 'Platform API Build System (Version: $(VERSION))'
@@ -39,6 +39,18 @@ help: ## Show this help message
 test: ## Run tests
 	@echo "Running tests..."
 	@cd src && go test -v ./...
+
+java-test: ## Run Java tests for migrated platform-api module
+	@echo "Running Java tests..."
+	@mvn -f java/pom.xml test
+
+java-build: ## Build Java artifact for migrated platform-api module
+	@echo "Building Java module..."
+	@mvn -f java/pom.xml clean package -DskipTests
+
+java-run: ## Run Java migrated platform-api service
+	@echo "Running Java service..."
+	@mvn -f java/pom.xml spring-boot:run
 
 build: ## Build Docker image
 	@echo "Building Docker image ($(IMAGE_NAME):$(VERSION))..."
