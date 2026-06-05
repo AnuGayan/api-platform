@@ -53,6 +53,7 @@ const (
 
 func toBackendConfig(cfg *config.Config) storage.BackendConfig {
 	pg := cfg.Controller.Storage.Postgres
+	ms := cfg.Controller.Storage.SQLServer
 	return storage.BackendConfig{
 		Type:       cfg.Controller.Storage.Type,
 		SQLitePath: cfg.Controller.Storage.SQLite.Path,
@@ -70,6 +71,22 @@ func toBackendConfig(cfg *config.Config) storage.BackendConfig {
 			ConnMaxLifetime: pg.ConnMaxLifetime,
 			ConnMaxIdleTime: pg.ConnMaxIdleTime,
 			ApplicationName: pg.ApplicationName,
+		},
+		SQLServer: storage.SQLServerConnectionConfig{
+			DSN:                    ms.DSN,
+			Host:                   ms.Host,
+			Port:                   ms.Port,
+			Database:               ms.Database,
+			User:                   ms.User,
+			Password:               ms.Password,
+			Encrypt:                ms.Encrypt,
+			TrustServerCertificate: ms.TrustServerCertificate,
+			ConnectTimeout:         ms.ConnectTimeout,
+			MaxOpenConns:           ms.MaxOpenConns,
+			MaxIdleConns:           ms.MaxIdleConns,
+			ConnMaxLifetime:        ms.ConnMaxLifetime,
+			ConnMaxIdleTime:        ms.ConnMaxIdleTime,
+			ApplicationName:        ms.ApplicationName,
 		},
 		GatewayID: cfg.Controller.Server.GatewayID,
 	}
@@ -154,10 +171,17 @@ func main() {
 	var eventHubStorage storage.Storage
 	// Create separate storage connection for EventHub (avoids SQLite lock contention)
 	ehBackendCfg := toBackendConfig(cfg)
+	// Apply the EventHub-specific pool sizing to whichever SQL backend is in use
+	// (a separate, smaller pool for the poller). Keep this in sync for every
+	// connection-pooled backend so the override isn't silently dropped.
 	ehBackendCfg.Postgres.MaxOpenConns = cfg.Controller.EventHub.Database.MaxOpenConns
 	ehBackendCfg.Postgres.MaxIdleConns = cfg.Controller.EventHub.Database.MaxIdleConns
 	ehBackendCfg.Postgres.ConnMaxLifetime = cfg.Controller.EventHub.Database.ConnMaxLifetime
 	ehBackendCfg.Postgres.ConnMaxIdleTime = cfg.Controller.EventHub.Database.ConnMaxIdleTime
+	ehBackendCfg.SQLServer.MaxOpenConns = cfg.Controller.EventHub.Database.MaxOpenConns
+	ehBackendCfg.SQLServer.MaxIdleConns = cfg.Controller.EventHub.Database.MaxIdleConns
+	ehBackendCfg.SQLServer.ConnMaxLifetime = cfg.Controller.EventHub.Database.ConnMaxLifetime
+	ehBackendCfg.SQLServer.ConnMaxIdleTime = cfg.Controller.EventHub.Database.ConnMaxIdleTime
 	eventHubStorage, err = storage.NewStorage(ehBackendCfg, log)
 	if err != nil {
 		log.Error("Failed to initialize EventHub storage", slog.Any("error", err))

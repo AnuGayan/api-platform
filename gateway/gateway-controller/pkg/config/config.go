@@ -249,9 +249,10 @@ type LLMConfig struct {
 
 // StorageConfig holds storage-related configuration
 type StorageConfig struct {
-	Type     string         `koanf:"type"`     // "sqlite", "postgres", or "memory"
-	SQLite   SQLiteConfig   `koanf:"sqlite"`   // SQLite-specific configuration
-	Postgres PostgresConfig `koanf:"postgres"` // PostgreSQL-specific configuration
+	Type      string          `koanf:"type"`      // "sqlite", "postgres", "sqlserver", or "memory"
+	SQLite    SQLiteConfig    `koanf:"sqlite"`    // SQLite-specific configuration
+	Postgres  PostgresConfig  `koanf:"postgres"`  // PostgreSQL-specific configuration
+	SQLServer SQLServerConfig `koanf:"sqlserver"` // SQL Server-specific configuration
 }
 
 // SQLiteConfig holds SQLite-specific configuration
@@ -274,6 +275,24 @@ type PostgresConfig struct {
 	ConnMaxLifetime time.Duration `koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime time.Duration `koanf:"conn_max_idle_time"`
 	ApplicationName string        `koanf:"application_name"`
+}
+
+// SQLServerConfig holds SQL Server-specific configuration.
+type SQLServerConfig struct {
+	DSN                    string        `koanf:"dsn"`
+	Host                   string        `koanf:"host"`
+	Port                   int           `koanf:"port"`
+	Database               string        `koanf:"database"`
+	User                   string        `koanf:"user"`
+	Password               string        `koanf:"password"`
+	Encrypt                string        `koanf:"encrypt"` // "disable", "false", "true", or "strict"
+	TrustServerCertificate bool          `koanf:"trust_server_certificate"`
+	ConnectTimeout         time.Duration `koanf:"connect_timeout"`
+	MaxOpenConns           int           `koanf:"max_open_conns"`
+	MaxIdleConns           int           `koanf:"max_idle_conns"`
+	ConnMaxLifetime        time.Duration `koanf:"conn_max_lifetime"`
+	ConnMaxIdleTime        time.Duration `koanf:"conn_max_idle_time"`
+	ApplicationName        string        `koanf:"application_name"`
 }
 
 // RouterConfig holds router (Envoy) related configuration
@@ -805,7 +824,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate storage type
-	validStorageTypes := []string{"sqlite", "postgres"}
+	validStorageTypes := []string{"sqlite", "postgres", "sqlserver"}
 	isValidType := false
 	for _, t := range validStorageTypes {
 		if c.Controller.Storage.Type == t {
@@ -898,6 +917,85 @@ func (c *Config) Validate() error {
 
 		if pg.ApplicationName == "" {
 			pg.ApplicationName = "gateway-controller"
+		}
+	}
+
+	// Validate SQL Server configuration
+	if c.Controller.Storage.Type == "sqlserver" {
+		ms := &c.Controller.Storage.SQLServer
+
+		if ms.DSN == "" {
+			if ms.Host == "" {
+				return fmt.Errorf("storage.sqlserver.host is required when storage.type is 'sqlserver' and storage.sqlserver.dsn is empty")
+			}
+			if ms.Database == "" {
+				return fmt.Errorf("storage.sqlserver.database is required when storage.type is 'sqlserver' and storage.sqlserver.dsn is empty")
+			}
+			if ms.User == "" {
+				return fmt.Errorf("storage.sqlserver.user is required when storage.type is 'sqlserver' and storage.sqlserver.dsn is empty")
+			}
+		}
+
+		if ms.Port <= 0 {
+			ms.Port = 1433
+		}
+		if ms.Port > 65535 {
+			return fmt.Errorf("storage.sqlserver.port must be between 1 and 65535, got: %d", ms.Port)
+		}
+
+		if ms.Encrypt == "" {
+			ms.Encrypt = "true"
+		}
+		validEncrypt := []string{"disable", "false", "true", "strict"}
+		isValidEncrypt := false
+		for _, e := range validEncrypt {
+			if strings.EqualFold(ms.Encrypt, e) {
+				ms.Encrypt = e
+				isValidEncrypt = true
+				break
+			}
+		}
+		if !isValidEncrypt {
+			return fmt.Errorf("storage.sqlserver.encrypt must be one of: disable, false, true, strict, got: %s", ms.Encrypt)
+		}
+
+		if ms.ConnectTimeout <= 0 {
+			ms.ConnectTimeout = 5 * time.Second
+		}
+
+		if ms.MaxOpenConns == 0 {
+			ms.MaxOpenConns = 25
+		}
+		if ms.MaxOpenConns < 1 {
+			return fmt.Errorf("storage.sqlserver.max_open_conns must be >= 1, got: %d", ms.MaxOpenConns)
+		}
+
+		if ms.MaxIdleConns == 0 {
+			ms.MaxIdleConns = 5
+		}
+		if ms.MaxIdleConns < 0 {
+			return fmt.Errorf("storage.sqlserver.max_idle_conns must be >= 0, got: %d", ms.MaxIdleConns)
+		}
+		if ms.MaxIdleConns > ms.MaxOpenConns {
+			ms.MaxIdleConns = ms.MaxOpenConns
+		}
+
+		if ms.ConnMaxLifetime == 0 {
+			ms.ConnMaxLifetime = 30 * time.Minute
+		}
+		if ms.ConnMaxLifetime < 0 {
+			return fmt.Errorf("storage.sqlserver.conn_max_lifetime must be >= 0, got: %s", ms.ConnMaxLifetime)
+		}
+
+		if ms.ConnMaxIdleTime == 0 {
+			ms.ConnMaxIdleTime = 5 * time.Minute
+		}
+		if ms.ConnMaxIdleTime < 0 {
+			return fmt.Errorf("storage.sqlserver.conn_max_idle_time must be >= 0, got: %s", ms.ConnMaxIdleTime)
+		}
+
+		if ms.ApplicationName == "" {
+			ms.ApplicationName = "gateway-controller"
 		}
 	}
 
