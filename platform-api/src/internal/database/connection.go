@@ -19,6 +19,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,8 +30,9 @@ import (
 
 	"platform-api/src/config"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver (pgx stdlib)
-	_ "github.com/mattn/go-sqlite3"    // SQLite3 driver
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -365,4 +367,67 @@ func (db *DB) Rebind(query string) string {
 	}
 	// For SQLite and other drivers, return as-is
 	return query
+}
+
+// BuildUpsertQuery generates a dialect-appropriate INSERT … ON CONFLICT … DO UPDATE query.
+// insertCols are all columns being inserted (each maps to one ? placeholder).
+// conflictCols are the columns that define uniqueness.
+// updateExprs control what happens on conflict: "col" → col = excluded.col, "col=NULL" → col = NULL.
+func (db *DB) BuildUpsertQuery(table string, insertCols []string, conflictCols []string, updateExprs []string) string {
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(insertCols)), ", ")
+
+	setClauses := make([]string, 0, len(updateExprs))
+	for _, expr := range updateExprs {
+		if idx := strings.Index(strings.ToUpper(expr), "=NULL"); idx >= 0 {
+			setClauses = append(setClauses, expr[:idx]+" = NULL")
+		} else {
+			setClauses = append(setClauses, expr+" = excluded."+expr)
+		}
+	}
+
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s)\nON CONFLICT (%s)\nDO UPDATE SET %s",
+		table,
+		strings.Join(insertCols, ", "),
+		placeholders,
+		strings.Join(conflictCols, ", "),
+		strings.Join(setClauses, ", "),
+	)
+}
+
+// InsertAndReturnID executes an INSERT query and returns the generated row ID.
+func (db *DB) InsertAndReturnID(query string, args ...any) (int64, error) {
+	if isPostgresDriver(db.driver) {
+		var id int64
+		err := db.QueryRow(db.Rebind(query+" RETURNING id"), args...).Scan(&id)
+		return id, err
+	}
+	result, err := db.Exec(db.Rebind(query), args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// IsDuplicateKeyError reports whether err is a unique-constraint or duplicate-key
+// violation for the current database driver.
+func (db *DB) IsDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return true
+	}
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey ||
+			sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+	}
+
+	lowerMsg := strings.ToLower(err.Error())
+	return strings.Contains(lowerMsg, "duplicate key") ||
+		strings.Contains(lowerMsg, "unique constraint failed")
 }
