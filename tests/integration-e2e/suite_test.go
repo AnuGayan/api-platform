@@ -122,8 +122,8 @@ func bringUpStack() error {
 	}
 	fmt.Printf("E2E database backend: %s (%s)\n", suite.db, suite.composeFile)
 
-	// Phase 1: control plane + backend.
-	phase1 := []string{"platform-api", "sample-backend"}
+	// Phase 1: control plane + backends (sample REST backend + mock OpenAI upstream).
+	phase1 := []string{"platform-api", "sample-backend", "mock-openapi"}
 	if suite.db != "sqlite" {
 		phase1 = append([]string{dbService()}, phase1...)
 	}

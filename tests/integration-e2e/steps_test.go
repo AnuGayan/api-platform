@@ -19,9 +19,12 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -35,6 +38,12 @@ type world struct {
 	apiContext string // e.g. /e2e-ab12cd34
 	depGw1     string
 	depGw2     string
+
+	// LLM deployment scenario.
+	llmProviderID   string
+	llmProxyID      string
+	llmProxyContext string // e.g. /e2e-llm-ab12cd34
+	lastChatBody    []byte
 }
 
 // initializeScenario is invoked by godog for each scenario; it binds a fresh
@@ -58,6 +67,13 @@ func initializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the second gateway serves the API$`, w.secondGatewayServes)
 	sc.Step(`^I undeploy the API from the second gateway$`, w.undeployFromSecondGateway)
 	sc.Step(`^the second gateway stops serving the API$`, w.secondGatewayStopsServing)
+
+	// LLM deployment scenario.
+	sc.Step(`^an LLM provider backed by the mock OpenAI upstream$`, w.anLLMProvider)
+	sc.Step(`^an LLM proxy for that provider$`, w.anLLMProxy)
+	sc.Step(`^I deploy the LLM provider and proxy to the gateway$`, w.deployLLMToGateway)
+	sc.Step(`^the gateway serves chat completions for the proxy$`, w.gatewayServesChatCompletions)
+	sc.Step(`^the chat completion response is OpenAI-shaped$`, w.chatResponseIsOpenAIShaped)
 }
 
 // --- Background steps ------------------------------------------------------
@@ -173,9 +189,9 @@ func (w *world) undeployFromSecondGateway() error { return undeploy(w.apiID, w.d
 
 // --- Then (data-plane assertions) ------------------------------------------
 
-func (w *world) gatewayServes() error          { return waitIngress(ingressGw1, w.apiContext, 200) }
-func (w *world) gatewayStopsServing() error    { return waitIngress(ingressGw1, w.apiContext, 404) }
-func (w *world) secondGatewayServes() error    { return waitIngress(ingressGw2, w.apiContext, 200) }
+func (w *world) gatewayServes() error       { return waitIngress(ingressGw1, w.apiContext, 200) }
+func (w *world) gatewayStopsServing() error { return waitIngress(ingressGw1, w.apiContext, 404) }
+func (w *world) secondGatewayServes() error { return waitIngress(ingressGw2, w.apiContext, 200) }
 func (w *world) secondGatewayStopsServing() error {
 	return waitIngress(ingressGw2, w.apiContext, 404)
 }
@@ -227,4 +243,136 @@ func randHex() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// --- LLM deployment scenario ------------------------------------------------
+
+// anLLMProvider creates an LLM provider whose upstream points at the in-stack
+// Prism mock (mock-openapi). The upstream API key is a dummy string — the mock
+// never validates it — so the flow needs no real OpenAI credential. The provider
+// uses the built-in "openai" template seeded by platform-api at startup.
+func (w *world) anLLMProvider() error {
+	suffix := randHex()
+	st, body, err := apiCall(http.MethodPost, "/api/v0.9/llm-providers", suite.token, map[string]any{
+		"id":       "e2e-prov-" + suffix,
+		"name":     "e2e-prov-" + suffix,
+		"version":  "v1.0",
+		"template": "openai",
+		"context":  "/e2e-prov-" + suffix,
+		"upstream": map[string]any{
+			"main": map[string]any{
+				"url":  "http://mock-openapi:4010",
+				"auth": map[string]any{"type": "api-key", "header": "Authorization", "value": "Bearer sk-test-key"},
+			},
+		},
+		"accessControl": map[string]any{"mode": "allow_all"},
+	})
+	if err != nil {
+		return err
+	}
+	w.llmProviderID = jsonField(body, "id", "handle", "uuid")
+	if st >= 300 || w.llmProviderID == "" {
+		return fmt.Errorf("create LLM provider failed (%d): %s", st, body)
+	}
+	return nil
+}
+
+func (w *world) anLLMProxy() error {
+	suffix := randHex()
+	w.llmProxyContext = "/e2e-llm-" + suffix
+	st, body, err := apiCall(http.MethodPost, "/api/v0.9/llm-proxies", suite.token, map[string]any{
+		"id":        "e2e-proxy-" + suffix,
+		"name":      "e2e-proxy-" + suffix,
+		"version":   "v1.0",
+		"projectId": suite.projectID,
+		"context":   w.llmProxyContext,
+		"provider":  map[string]any{"id": w.llmProviderID},
+	})
+	if err != nil {
+		return err
+	}
+	w.llmProxyID = jsonField(body, "id", "handle", "uuid")
+	if st >= 300 || w.llmProxyID == "" {
+		return fmt.Errorf("create LLM proxy failed (%d): %s", st, body)
+	}
+	return nil
+}
+
+// deployLLMToGateway deploys the provider then the proxy to the gateway and
+// bounces the controller so it runs its one-time deployment sync (same mechanism
+// as the REST-API deploy step; see deploy()).
+func (w *world) deployLLMToGateway() error {
+	if err := deployArtifact("/api/v0.9/llm-providers/" + w.llmProviderID + "/deployments"); err != nil {
+		return fmt.Errorf("deploy LLM provider: %w", err)
+	}
+	if err := deployArtifact("/api/v0.9/llm-proxies/" + w.llmProxyID + "/deployments"); err != nil {
+		return fmt.Errorf("deploy LLM proxy: %w", err)
+	}
+	if err := compose(nil, "restart", "gateway-controller"); err != nil {
+		return fmt.Errorf("restart gateway-controller: %w", err)
+	}
+	return nil
+}
+
+// deployArtifact posts a DeployRequest to the given deployments endpoint for the
+// primary gateway. Returns an error unless the deployment is accepted.
+func deployArtifact(path string) error {
+	st, body, err := apiCall(http.MethodPost, path, suite.token, map[string]any{
+		"base": "current", "gatewayId": suite.gw1ID, "name": "dep-" + randHex(),
+	})
+	if err != nil {
+		return err
+	}
+	if st >= 300 {
+		return fmt.Errorf("deploy failed (%d): %s", st, body)
+	}
+	return nil
+}
+
+func (w *world) gatewayServesChatCompletions() error {
+	deadline := time.Now().Add(pollTimeout)
+	var lastStatus int
+	for time.Now().Before(deadline) {
+		st, body := ingressPost(ingressGw1, w.llmProxyContext+"/chat/completions", map[string]any{
+			"model":    "gpt-4",
+			"messages": []map[string]string{{"role": "user", "content": "Hello from the e2e LLM test!"}},
+		})
+		if st == 200 {
+			w.lastChatBody = body
+			return nil
+		}
+		lastStatus = st
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("gateway did not serve chat completions at %s%s/chat/completions: last status %d",
+		ingressGw1, w.llmProxyContext, lastStatus)
+}
+
+func (w *world) chatResponseIsOpenAIShaped() error {
+	if !bytes.Contains(w.lastChatBody, []byte("chat.completion")) {
+		return fmt.Errorf("chat response missing object \"chat.completion\": %s", w.lastChatBody)
+	}
+	if !bytes.Contains(w.lastChatBody, []byte("choices")) {
+		return fmt.Errorf("chat response missing \"choices\": %s", w.lastChatBody)
+	}
+	return nil
+}
+
+// ingressPost sends a POST to the gateway ingress with the vhost Host header the
+// gateway routes on, returning the status code and response body.
+func ingressPost(base, path string, body any) (int, []byte) {
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(b))
+	if err != nil {
+		return -1, nil
+	}
+	req.Host = ingressHost // gateway routes by vhost
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, nil
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, out
 }

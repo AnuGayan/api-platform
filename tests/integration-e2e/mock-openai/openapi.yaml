@@ -1,0 +1,52 @@
+# Minimal OpenAI-shaped mock served by Prism for the LLM end-to-end scenario.
+# The gateway forwards `<proxy-context>/chat/completions` to the provider upstream
+# (http://mock-openapi:4010), so this spec only needs the chat-completions path.
+# Prism returns the `example` below, giving a deterministic `chat.completion`
+# response — no real OpenAI endpoint and no real API key are involved.
+openapi: 3.0.3
+info:
+  title: Mock OpenAI
+  version: v1.0
+paths:
+  /chat/completions:
+    post:
+      operationId: createChatCompletion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: A chat completion
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { type: string }
+                  created: { type: integer }
+                  model: { type: string }
+                  choices:
+                    type: array
+                    items:
+                      type: object
+                  usage:
+                    type: object
+              example:
+                id: chatcmpl-e2e-mock
+                object: chat.completion
+                created: 1700000000
+                model: gpt-4
+                choices:
+                  - index: 0
+                    message:
+                      role: assistant
+                      content: "Hello from the e2e mock LLM."
+                    finish_reason: stop
+                usage:
+                  prompt_tokens: 9
+                  completion_tokens: 12
+                  total_tokens: 21

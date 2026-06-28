@@ -41,9 +41,11 @@ consistent with `gateway/it`:
 
 | File | Purpose |
 |------|---------|
-| `features/api-deployment.feature` | The scenarios (Gherkin). |
+| `features/api-deployment.feature` | The REST-API deployment scenarios (Gherkin). |
+| `features/llm-deployment.feature` | The LLM-proxy deployment scenario (`@llm`). |
 | `suite_test.go` | godog runner + `BeforeSuite`/`AfterSuite` (compose orchestration, bootstrap) + platform-api REST helpers. |
 | `steps_test.go` | step definitions + ingress polling. |
+| `mock-openai/openapi.yaml` | minimal OpenAI spec served by Prism (`mock-openapi`) as the LLM upstream. |
 | `docker-compose*.yaml` | the stack per database engine. |
 
 ### How the harness works
@@ -93,6 +95,13 @@ Or via make (from `platform-api/`): `make e2e`, `make e2e-all-dbs`.
 3. **Multi-gateway** (`@multigateway`, postgres) — the same API deployed to two
    gateways is served by both (fan-out), and undeploying from one leaves the
    other serving (per-gateway isolation).
+4. **LLM proxy deployment** (`@llm`) — an LLM provider (built-in `openai`
+   template, upstream pointed at the in-stack `mock-openapi` Prism service with a
+   **dummy API key**) and a proxy referencing it are created in platform-api and
+   deployed to the gateway; a `POST <proxy-context>/chat/completions` to the
+   ingress then returns a `chat.completion` response proxied from the mock. No
+   real OpenAI endpoint or credential is involved. The mock upstream is published
+   on host port `4010` (override with `MOCK_OPENAI_PORT`).
 
 ## Status — passing on all three databases
 

@@ -118,6 +118,18 @@ services:
       - "9080:9080"
     networks: [e2e]
 
+  # Mock OpenAI upstream (Prism) for the LLM deployment scenario. The deployed
+  # LLM proxy's chat-completions are routed here, so the end-to-end flow needs
+  # no real OpenAI endpoint and no real API key.
+  mock-openapi:
+    image: stoplight/prism:5.14.3
+    command: ["mock", "/api/openapi.yaml", "--host", "0.0.0.0"]
+    volumes:
+      - ./mock-openai:/api:ro
+    ports:
+      - "${MOCK_OPENAI_PORT:-4010}:4010"
+    networks: [e2e]
+
 networks:
   e2e:
     driver: bridge
