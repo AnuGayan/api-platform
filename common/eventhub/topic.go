@@ -36,6 +36,13 @@ type gateway struct {
 	subscribers  []chan Event
 	knownVersion string
 	lastPolled   int64
+	// delivered records the event IDs already sent to subscribers, keyed to
+	// each event's processed timestamp so entries can be pruned once they age
+	// out of the poll lookback window. It exists because polls deliberately
+	// re-read a lookback window behind lastPolled: publish transactions bind
+	// processed_timestamp before commit, so a slow publish can commit a row
+	// whose timestamp sorts before events that were already delivered.
+	delivered map[string]int64
 }
 
 // gatewayRegistry manages gateway registrations and subscribers.
@@ -63,6 +70,7 @@ func (r *gatewayRegistry) register(gatewayID string) error {
 	r.gateways[gatewayID] = &gateway{
 		id:          gatewayID,
 		subscribers: make([]chan Event, 0),
+		delivered:   make(map[string]int64),
 	}
 	return nil
 }
@@ -117,8 +125,12 @@ func (r *gatewayRegistry) removeSubscriber(gatewayID string, subscriber <-chan E
 		// fetches events since lastPolled. lastPolled is intentionally kept so
 		// the reconnecting gateway replays all events missed during the disconnect
 		// window (up to the retention period), not just the last 120 s skew window.
+		// The delivered set is cleared with it: a fresh subscriber gets the full
+		// replay from lastPolled rather than inheriting the old connection's
+		// dedup state.
 		if len(gw.subscribers) == 0 {
 			gw.knownVersion = ""
+			gw.delivered = make(map[string]int64)
 		}
 
 		return ch, nil
@@ -140,6 +152,7 @@ func (r *gatewayRegistry) removeAllSubscribers(gatewayID string) ([]chan Event, 
 	subscribers := gw.subscribers
 	gw.subscribers = nil
 	gw.knownVersion = ""
+	gw.delivered = make(map[string]int64)
 	return subscribers, nil
 }
 

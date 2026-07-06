@@ -746,7 +746,7 @@ func TestPollGatewayWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	}
 }
 
-func TestPollGatewayWithStateDropsSingleBoundaryEvent(t *testing.T) {
+func TestPollGatewayWithStateSkipsAlreadyDeliveredEvents(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
@@ -773,7 +773,11 @@ func TestPollGatewayWithStateDropsSingleBoundaryEvent(t *testing.T) {
 
 	gateway, err := backend.registry.get("test-org")
 	require.NoError(t, err)
+	// The boundary event was delivered on a previous poll: the cursor sits on
+	// its timestamp and its ID is in the delivered set. The lookback re-read
+	// returns it again; dedup must drop it and deliver only the later event.
 	gateway.lastPolled = boundaryTs.UnixNano()
+	gateway.delivered["boundary-single"] = boundaryTs.UnixNano()
 
 	state := GatewayState{
 		GatewayID: "test-org",
@@ -795,6 +799,54 @@ func TestPollGatewayWithStateDropsSingleBoundaryEvent(t *testing.T) {
 		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
 	case <-time.After(150 * time.Millisecond):
 	}
+}
+
+func TestPollGatewayWithStateDeliversLateCommitBehindCursor(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterGateway("test-org"))
+	ch, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	// A publish that stalled on the DB write lock commits a row whose
+	// timestamp sorts BEFORE the already-advanced delivery cursor. The
+	// lookback re-read must still deliver it, and the cursor must not move
+	// backward when it does.
+	cursorTs := time.Now().Add(-2 * time.Second)
+	lateTs := cursorTs.Add(-5 * time.Second)
+	_, err = db.Exec(`
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", lateTs, lateTs, "API", "DELETE", "late-entity", "late-commit", "{}",
+	)
+	require.NoError(t, err)
+
+	gateway, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+	gateway.lastPolled = cursorTs.UnixNano()
+
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v9",
+	}
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "late-entity", evt.EntityID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for late-committed event")
+	}
+	assert.Equal(t, "v9", gateway.knownVersion)
+	assert.Equal(t, cursorTs.UnixNano(), gateway.lastPolled, "cursor must not move backward on late delivery")
 }
 
 func TestPollGatewayWithStateKeepsBoundaryOverlapEvents(t *testing.T) {

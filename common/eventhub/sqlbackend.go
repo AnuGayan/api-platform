@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,14 @@ import (
 const (
 	// initialPollSkewWindow limits first-time replay to a recent window instead of full history.
 	initialPollSkewWindow = 120 * time.Second
+	// deliveryLookback is how far behind the delivery cursor each poll re-reads.
+	// processed_timestamp is bound at the INSERT inside the publish transaction,
+	// before commit, so a publish that stalls on the database write lock (for
+	// SQLite the storage layer shares the file; busy_timeout is 5s) can commit a
+	// row whose timestamp sorts before rows that were already delivered. A plain
+	// `>= cursor` scan would then skip that event forever. Re-reading this window
+	// and deduplicating by event ID picks such late commits up on a later poll.
+	deliveryLookback = 30 * time.Second
 	// Thresholds used to infer unix timestamp units (seconds/millis/micros/nanos).
 	unixMillisThreshold = int64(100_000_000_000)
 	unixMicrosThreshold = int64(100_000_000_000_000)
@@ -50,6 +59,12 @@ type SQLBackend struct {
 	bindType int
 
 	registry *gatewayRegistry
+
+	// publishMu serializes Publish transactions from this process so that
+	// processed_timestamp order matches publish order. Without it, concurrent
+	// publishers (REST handlers, control-plane client goroutines) can bind
+	// timestamps in one order and commit in another.
+	publishMu sync.Mutex
 
 	// Prepared statements
 	stmtMu                   sync.RWMutex
@@ -314,6 +329,9 @@ func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 		eventID = event.EventID
 	}
 
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
+
 	tx, err := b.db.BeginTx(b.ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -562,17 +580,21 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 		return nil // No changes
 	}
 
-	// Fetch new events since last poll
-	var lastPolledTime time.Time
-	resumingFromLastPolled := lastPolled > 0
+	// Fetch new events since last poll. When resuming, re-read a lookback
+	// window behind the cursor and rely on the per-gateway delivered set to
+	// drop what was already sent — a publish that committed late with an
+	// already-passed timestamp is caught on this re-read. Late arrivals are
+	// delivered out of timestamp order; consumers reconcile against stored
+	// state, so completeness matters here, not order.
+	var queryFrom time.Time
 	if lastPolled > 0 {
-		lastPolledTime = unixTimestampToTime(lastPolled)
+		queryFrom = unixTimestampToTime(lastPolled).Add(-deliveryLookback)
 	} else {
 		// First poll - only replay a short recent window to avoid catching full history.
-		lastPolledTime = time.Now().Add(-initialPollSkewWindow)
+		queryFrom = time.Now().Add(-initialPollSkewWindow)
 	}
 
-	rows, err := b.getEventsStmt.Query(gw.id, lastPolledTime)
+	rows, err := b.getEventsStmt.Query(gw.id, queryFrom)
 	if err != nil {
 		return fmt.Errorf("failed to query events: %w", err)
 	}
@@ -605,20 +627,23 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 		return fmt.Errorf("error iterating event rows: %w", err)
 	}
 
-	events = trimSingleBoundaryReplay(events, lastPolledTime, resumingFromLastPolled)
-
 	// TODO: (VirajSalaka) In the initial startup, we fetch the past events for 120 seconds.
 	// But if there are lot of events during the period, we need to capture the tail events.
 
-	// Deliver events to subscribers. If any subscriber buffer is full, stop at
-	// the first blocked event so the next poll resumes from the last delivered one.
+	// Deliver events to subscribers, skipping those already delivered on a
+	// previous poll of the lookback window. If any subscriber buffer is full,
+	// stop at the first blocked event so the next poll resumes from there
+	// (knownVersion is left stale to force that re-poll).
 	var latestDeliveredTimestamp time.Time
-	deliveredCount := 0
+	deliveredIDs := make(map[string]int64)
 	deliveryBlocked := false
 	deliveredSubscriberCount := 0
 	b.registry.mu.RLock()
 	subscribers := gw.subscribers
 	for _, evt := range events {
+		if _, alreadySent := gw.delivered[evt.EventID]; alreadySent {
+			continue
+		}
 		if !subscriberChannelsAvailable(subscribers) {
 			deliveryBlocked = true
 			b.logger.Warn("Subscriber channel full, deferring event delivery",
@@ -626,58 +651,48 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 				slog.String("entity_id", evt.EntityID))
 			break
 		}
-		// Delivery Starts from the point the subscription is made.
-		// Hence we can keep updating the last polled timestamp regardless of number of subscribers available.
 		for _, ch := range subscribers {
 			ch <- evt
 		}
 		deliveredSubscriberCount = len(subscribers)
-		latestDeliveredTimestamp = evt.ProcessedTimestamp
-		deliveredCount++
+		deliveredIDs[evt.EventID] = evt.ProcessedTimestamp.UnixNano()
+		if evt.ProcessedTimestamp.After(latestDeliveredTimestamp) {
+			latestDeliveredTimestamp = evt.ProcessedTimestamp
+		}
 	}
 	b.registry.mu.RUnlock()
 
-	// Update known version and last polled time
+	// Update known version, delivery cursor, and the delivered set. The cursor
+	// only moves forward: a late-committed event carries an old timestamp and
+	// must not drag the lookback window back with it.
 	b.registry.mu.Lock()
-	if deliveryBlocked {
-		if !latestDeliveredTimestamp.IsZero() {
-			gw.lastPolled = latestDeliveredTimestamp.UnixNano()
-		} else {
-			gw.lastPolled = lastPolledTime.UnixNano()
-		}
-	} else {
+	if !deliveryBlocked {
 		gw.knownVersion = state.VersionID
-		if !latestDeliveredTimestamp.IsZero() {
-			gw.lastPolled = latestDeliveredTimestamp.UnixNano()
+	}
+	maps.Copy(gw.delivered, deliveredIDs)
+	if latestDeliveredTimestamp.UnixNano() > gw.lastPolled {
+		gw.lastPolled = latestDeliveredTimestamp.UnixNano()
+	}
+	// Drop delivered entries that have aged out of the lookback window; the
+	// poll query can never return their rows again.
+	if gw.lastPolled > 0 {
+		horizon := gw.lastPolled - deliveryLookback.Nanoseconds()
+		for id, ts := range gw.delivered {
+			if ts < horizon {
+				delete(gw.delivered, id)
+			}
 		}
 	}
 	b.registry.mu.Unlock()
 
-	if deliveredCount > 0 {
+	if len(deliveredIDs) > 0 {
 		b.logger.Debug("Delivered events to subscribers",
 			slog.String("gateway_id", gw.id),
-			slog.Int("event_count", deliveredCount),
+			slog.Int("event_count", len(deliveredIDs)),
 			slog.Int("subscriber_count", deliveredSubscriberCount))
 	}
 
 	return nil
-}
-
-// The poll query uses `processed_timestamp >= lastPolled` so a second event that
-// shares the last delivered timestamp is not missed. Results are ordered by
-// `processed_timestamp ASC`, so any boundary matches appear at the front: if
-// only the first row matches, it is the normal replay and we drop it; if the
-// first two rows match, we keep the full slice to preserve the overlap case.
-func trimSingleBoundaryReplay(events []Event, boundary time.Time, enabled bool) []Event {
-	if !enabled || len(events) == 0 || !events[0].ProcessedTimestamp.Equal(boundary) {
-		return events
-	}
-
-	if len(events) == 1 || !events[1].ProcessedTimestamp.Equal(boundary) {
-		return events[1:]
-	}
-
-	return events
 }
 
 // cleanupLoop periodically removes old events
