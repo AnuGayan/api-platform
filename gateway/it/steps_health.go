@@ -19,14 +19,12 @@
 package it
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/cucumber/godog"
-	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/admin"
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
@@ -253,6 +251,9 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 			return fmt.Errorf("failed to create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// MCP endpoints require an Accept header offering both JSON and SSE;
+		// harmless for the plain JSON endpoints this step is also used with.
+		req.Header.Set("Accept", "application/json, text/event-stream")
 
 		resp, err := h.state.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
@@ -280,20 +281,14 @@ func (h *HealthSteps) waitForPolicySnapshotSync() error {
 	// Postgres topology the suite sets PolicySnapshotControllerAdminURL to
 	// gateway-controller-xds (port 9093); otherwise (single-controller
 	// topologies, unit tests) we fall back to the management controller.
-	adminBase := h.state.Config.PolicySnapshotControllerAdminURL
-	if adminBase == "" {
-		adminBase = h.state.Config.GatewayControllerAdminURL
-	}
-	controllerURL := fmt.Sprintf("%s/xds_sync_status", adminBase)
-	policyEngineURL := fmt.Sprintf("%s/xds_sync_status", h.state.Config.PolicyEngineURL)
 	lastControllerVersion := ""
 	lastRuntimeVersion := ""
 	var lastControllerErr error
 	var lastRuntimeErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		controllerVersion, controllerErr := h.getControllerPolicyVersion(controllerURL)
-		runtimeVersion, runtimeErr := h.getPolicyEnginePolicyVersion(policyEngineURL)
+		controllerVersion, controllerErr := fetchControllerPolicyVersion(h.state)
+		runtimeVersion, runtimeErr := fetchPolicyEnginePolicyVersion(h.state)
 		lastControllerVersion = controllerVersion
 		lastRuntimeVersion = runtimeVersion
 		lastControllerErr = controllerErr
@@ -311,55 +306,4 @@ func (h *HealthSteps) waitForPolicySnapshotSync() error {
 
 	return fmt.Errorf("policy snapshot versions did not sync in time between controller and policy engine: controller_version=%q runtime_version=%q controller_err=%v runtime_err=%v",
 		lastControllerVersion, lastRuntimeVersion, lastControllerErr, lastRuntimeErr)
-}
-
-func (h *HealthSteps) getControllerPolicyVersion(url string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	if admin, ok := h.state.Config.Users["admin"]; ok {
-		req.SetBasicAuth(admin.Username, admin.Password)
-	}
-
-	resp, err := h.state.HTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("controller xds sync endpoint returned status %d", resp.StatusCode)
-	}
-
-	var payload adminapi.XDSSyncStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
-	}
-	if payload.PolicyChainVersion == nil {
-		return "", fmt.Errorf("policy chain version is nil in response")
-	}
-	return *payload.PolicyChainVersion, nil
-}
-
-func (h *HealthSteps) getPolicyEnginePolicyVersion(url string) (string, error) {
-	resp, err := h.state.HTTPClient.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("policy engine xds sync endpoint returned status %d", resp.StatusCode)
-	}
-
-	var payload adminapi.XDSSyncStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
-	}
-	if payload.PolicyChainVersion == nil {
-		return "", fmt.Errorf("policy chain version is nil in response")
-	}
-	return *payload.PolicyChainVersion, nil
 }

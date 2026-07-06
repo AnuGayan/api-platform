@@ -31,13 +31,13 @@ import (
 // RegisterLLMSteps registers all LLM provider template and provider step definitions
 func RegisterLLMSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
 	createLLMProvider := func(body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPOSTToService("gateway-controller", "/llm-providers", body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	}
 
 	// ========================================
@@ -233,24 +233,24 @@ func RegisterLLMSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 
 	// LLM Provider CRUD steps
 	ctx.Step(`^I create this LLM provider:$`, createLLMProvider)
-	
+
 	ctx.Step(`^I update the LLM provider "([^"]*)" with:$`, func(providerID string, body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPUTToService("gateway-controller", "/llm-providers/"+providerID, body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	})
 
 	ctx.Step(`^I delete the LLM provider "([^"]*)"$`, func(providerID string) error {
+		preVersion := capturePolicyVersion(state)
 		err := httpSteps.SendDELETEToService("gateway-controller", "/llm-providers/"+providerID)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyDeletion(state, httpSteps, preVersion)
 	})
 
 	// Generic lazy resource assertions (for both templates and provider mappings)

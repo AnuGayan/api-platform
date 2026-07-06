@@ -21,7 +21,6 @@ package it
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/wso2/api-platform/gateway/it/steps"
@@ -37,13 +36,13 @@ type JsonRPCRequest struct {
 // RegisterMCPSteps registers all MCP related step definitions
 func RegisterMCPSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps, jwtSteps *JWTSteps) {
 	ctx.Step(`^I deploy this MCP configuration:$`, func(body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPOSTToService("gateway-controller", "/mcp-proxies", body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	})
 
 	ctx.Step(`^I list all MCP proxies$`, func() error {
@@ -51,22 +50,22 @@ func RegisterMCPSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 	})
 
 	ctx.Step(`^I update the MCP proxy "([^"]*)" with:$`, func(name string, body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPUTToService("gateway-controller", "/mcp-proxies/"+name, body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	})
 
 	ctx.Step(`^I delete the MCP proxy "([^"]*)"$`, func(name string) error {
+		preVersion := capturePolicyVersion(state)
 		err := httpSteps.SendDELETEToService("gateway-controller", "/mcp-proxies/"+name)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyDeletion(state, httpSteps, preVersion)
 	})
 
 	ctx.Step(`^I use the MCP Client to send an initialize request to "([^"]*)"$`, func(url string) error {

@@ -25,32 +25,34 @@ import (
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
-// policyPropagationDelay is the time to wait after mutating operations
-// to allow the Policy Engine to receive and apply configuration changes.
-// Reduced from 2s to 500ms as xDS sync typically completes in <500ms.
+// policyPropagationDelay is the fallback wait after mutating operations whose
+// propagation cannot be observed via the policy-chain xDS version — LLM
+// provider templates (lazy-resource store) and subscription plans/injections
+// (subscription store). Policy-chain artifacts (REST APIs, MCP proxies, LLM
+// providers) use awaitPolicyPropagation instead of a fixed sleep.
 const policyPropagationDelay = 1 * time.Second
 
 // RegisterAPISteps registers all API deployment step definitions
 func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
 	// Single deploy function used by multiple step patterns
 	deployAPI := func(body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	}
 
 	// Single delete function used by multiple step patterns
 	deleteAPI := func(name string) error {
+		preVersion := capturePolicyVersion(state)
 		err := httpSteps.SendDELETEToService("gateway-controller", "/rest-apis/"+name)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyDeletion(state, httpSteps, preVersion)
 	}
 
 	// Register multiple step patterns for deploy
@@ -67,13 +69,13 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 	})
 
 	ctx.Step(`^I update the API "([^"]*)" with this configuration:$`, func(apiName string, body *godog.DocString) error {
+		preVersion := capturePolicyVersion(state)
 		httpSteps.SetHeader("Content-Type", "application/yaml")
 		err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, body)
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return awaitPolicyPropagation(state, httpSteps, preVersion)
 	})
 
 	ctx.Step(`^I get the API "([^"]*)"$`, func(name string) error {

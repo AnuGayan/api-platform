@@ -16,7 +16,7 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: all test test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags
+.PHONY: all test test-persistence test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags
 
 VERSION ?= $(shell cat ../VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.1-SNAPSHOT")
 DOCKER_REGISTRY ?= ghcr.io/wso2/api-platform
@@ -48,6 +48,18 @@ ensure-test-tags:
 # Requires: make build-coverage-image (run once before tests)
 test: ensure-test-tags
 	COMPOSE_FILE=$(COMPOSE_FILE) go test -v -timeout 50m ./...
+
+# Persistence-focused feature subset for DB-backed runs (Postgres / SQL Server).
+# Most of the suite exercises the policy engine and Envoy, which never touch
+# the database; DB-backed CI runs only need the features that hit the storage
+# layer (schema bootstrap, CRUD, pagination/search, secrets, certificates,
+# API keys) plus deploy round-trips that verify event-driven xDS propagation.
+# health and api_deploy run first to warm the gateway (cold-start 503s).
+PERSISTENCE_FEATURES := features/health.feature,features/api_deploy.feature,features/api-management.feature,features/startup-db-bootstrap.feature,features/secrets.feature,features/certificates.feature,features/api-keys.feature,features/search-deployments.feature,features/config-dump.feature,features/llm-provider.feature,features/llm-provider-templates.feature,features/llm-proxies.feature,features/mcp_deploy.feature,features/subscription-validation.feature
+
+# Run only the persistence-focused features (combine with COMPOSE_FILE to pick the DB)
+test-persistence:
+	IT_FEATURE_PATHS=$(PERSISTENCE_FEATURES) $(MAKE) test
 
 # Build all coverage-instrumented gateway components
 build-coverage:

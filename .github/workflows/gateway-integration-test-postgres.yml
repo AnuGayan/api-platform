@@ -73,9 +73,13 @@ jobs:
           [ "${conn_count:-0}" -ge 1 ]
 
       - name: Run integration tests
+        # Persistence-focused subset only: the full suite mostly exercises the
+        # policy engine and Envoy, which are database-agnostic and already
+        # covered by the default (SQLite) integration-test workflow. The
+        # feature list lives in gateway/it/Makefile (PERSISTENCE_FEATURES).
         run: |
           cd gateway
-          COMPOSE_FILE=docker-compose.test.postgres.yaml IT_GATEWAY_CONTROLLER_HA=true make test-integration
+          COMPOSE_FILE=docker-compose.test.postgres.yaml IT_GATEWAY_CONTROLLER_HA=true make test-integration-persistence
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

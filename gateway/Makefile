@@ -176,6 +176,10 @@ test-policy-engine: ## Test policy-engine
 test-integration: ## Run integration tests
 	$(MAKE) -C it test
 
+.PHONY: test-integration-persistence
+test-integration-persistence: ## Run persistence-focused integration tests (for DB-backed CI runs)
+	$(MAKE) -C it test-persistence
+
 .PHONY: test-integration-all
 test-integration-all: build-coverage test-integration ## Build coverage images and run integration tests
 

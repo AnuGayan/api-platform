@@ -53,8 +53,8 @@ Feature: Test MCP CRUD and connectivity
         And the response should be valid JSON
         And the JSON response field "status" should be "success"
         And the JSON response field "count" should be 1
-        And I wait for 2 seconds
-    
+        And I wait for the endpoint "http://127.0.0.1:8080/everything/mcp" to be ready with method "POST" and body '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"readiness-probe","version":"1.0"}}}'
+
         When I use the MCP Client to send an initialize request to "http://127.0.0.1:8080/everything/mcp"
         Then the response should be successful
         When I use the MCP Client to send "add" tools/call request to "http://127.0.0.1:8080/everything/mcp"
@@ -118,7 +118,7 @@ Feature: Test MCP CRUD and connectivity
         Then the response should be successful
         And the response should be valid JSON
         And the JSON response field "status" should be "success"
-        And I wait for 2 seconds
+        And I wait for the endpoint "http://127.0.0.1:8080/invalid-tools/mcp" to be ready with method "POST" and body '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"readiness-probe","version":"1.0"}}}'
 
         When I use the MCP Client to send a tools/call request with invalid params to "http://127.0.0.1:8080/invalid-tools/mcp"
         Then the response status code should be 400
