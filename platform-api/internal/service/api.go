@@ -788,14 +788,21 @@ func (s *APIService) applyAPIUpdates(existingAPIModel *model.API, req *api.RESTA
 	}
 	existingAPI.Policies = req.Policies
 	existingAPI.SubscriptionPlans = req.SubscriptionPlans
+	// Upstream auth values are write-only (redacted on read), so updates
+	// routinely arrive with auth values empty or an endpoint omitted — either a
+	// redacted read-modify-write round-trip or a partial update. An empty auth
+	// value or an omitted endpoint means "keep the stored credential", never
+	// "delete it"; always merge the stored (unredacted) auth back in.
+	//
+	// base is the upstream the client intends to persist: the request's when it
+	// supplied one, otherwise the stored upstream (existingAPI came from the
+	// redacted model mapping, so its auth values are nil and get restored by the
+	// merge below). isEmptyUpstream only inspects Url/Ref, hence this guard.
+	base := existingAPI.Upstream
 	if !s.isEmptyUpstream(req.Upstream) {
-		// isEmptyUpstream only looks at Url/Ref, so a request that updates the
-		// URL but omits auth (routine — auth.value is redacted on GET, so a
-		// naive read-modify-write round-trip never has it to resend) must not
-		// wipe the stored credential. Preserve auth from the existing model
-		// (unredacted) whenever the incoming value is empty.
-		existingAPI.Upstream = preserveUpstreamAuthOnAPIUpdate(existingAPIModel.Configuration.Upstream, req.Upstream)
+		base = req.Upstream
 	}
+	existingAPI.Upstream = preserveUpstreamAuthOnAPIUpdate(existingAPIModel.Configuration.Upstream, base)
 
 	return existingAPI, nil
 }
@@ -804,12 +811,39 @@ func (s *APIService) applyAPIUpdates(existingAPIModel *model.API, req *api.RESTA
 // existing's stored (unredacted) values whenever updated's auth value is
 // empty, then returns updated with those merged auth blocks. Non-auth fields
 // (Url, Ref) are taken from updated as-is.
+//
+// Auth values are write-only (redacted on read), so an empty auth value or an
+// omitted endpoint means "keep the stored credential", never "delete it":
+//   - an empty/absent auth value is backfilled from the stored model;
+//   - a Sandbox omitted from the request but present in storage is restored
+//     from the stored (unredacted) model, so a partial update that touches only
+//     Main does not drop the sandbox endpoint and orphan/delete its secret.
+//
+// (Removing a sandbox is therefore an explicit operation, not a side effect of
+// an omitted field — mirroring how omitted auth values are treated.)
 func preserveUpstreamAuthOnAPIUpdate(existing model.UpstreamConfig, updated api.Upstream) api.Upstream {
 	updated.Main.Auth = preserveAPIUpstreamAuth(existing.Main, updated.Main.Auth)
-	if updated.Sandbox != nil {
+	switch {
+	case updated.Sandbox != nil:
 		updated.Sandbox.Auth = preserveAPIUpstreamAuth(existing.Sandbox, updated.Sandbox.Auth)
+	case existing.Sandbox != nil:
+		updated.Sandbox = storedUpstreamEndpointToAPI(existing.Sandbox)
 	}
 	return updated
+}
+
+// storedUpstreamEndpointToAPI rebuilds an api.UpstreamDefinition from a stored
+// (unredacted) endpoint, carrying its real auth credential. Used to restore an
+// endpoint the update request omitted so its credential is not lost.
+func storedUpstreamEndpointToAPI(endpoint *model.UpstreamEndpoint) *api.UpstreamDefinition {
+	if endpoint == nil {
+		return nil
+	}
+	return &api.UpstreamDefinition{
+		Url:  utils.StringPtrIfNotEmpty(endpoint.URL),
+		Ref:  utils.StringPtrIfNotEmpty(endpoint.Ref),
+		Auth: preserveAPIUpstreamAuth(endpoint, nil),
+	}
 }
 
 // preserveAPIUpstreamAuth backfills updated's Value from existing's stored
