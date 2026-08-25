@@ -436,10 +436,11 @@ func StartPlatformAPIServer(cfg *config.Server, slogger *slog.Logger,
 	// assignment itself is the compile-time contract check: if a service method
 	// signature drifts from the pdk interface, this stops building.
 	pdkDeps := &pdk.Deps{
-		Gateways: gatewayService,
-		RestAPIs: apiService,
-		Config:   cfg,
-		Logger:   slogger,
+		Gateways:      gatewayService,
+		RestAPIs:      apiService,
+		Organizations: orgService,
+		Config:        cfg,
+		Logger:        slogger,
 	}
 
 	wiring, err := initPlugins(slogger, mux, scopeRegistry, pluginDeps, pdkDeps, internalPlugins, externalPlugins)
